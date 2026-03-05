@@ -1,0 +1,22 @@
+{
+  "name": "saytodo",
+  "version": "1.0.0",
+  "description": "Voice-powered todo list for macOS",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "prebuild": "swiftc speech-helper.swift -o assets/speech-helper -framework Speech -framework AVFoundation",
+    "build": "npm run prebuild && electron-builder --mac",
+    "build:x64": "electron-builder --mac --x64",
+    "build:arm64": "electron-builder --mac --arm64",
+    "generate-icon": "node generate-icon.js"
+  },
+  "devDependencies": {
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "uiohook-napi": "^1.5.4"
+  }
+}

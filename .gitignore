@@ -1,0 +1,7 @@
+node_modules/
+dist/
+assets/speech-helper
+*.dmg
+*.blockmap
+.DS_Store
+.env

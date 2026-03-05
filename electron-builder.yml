@@ -1,0 +1,31 @@
+appId: com.saytodo.app
+productName: SayTodo
+directories:
+  output: dist
+mac:
+  category: public.app-category.productivity
+  icon: assets/icon.png
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  identity: null
+  entitlements: entitlements.plist
+  entitlementsInherit: entitlements.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: "SayTodo needs microphone access to capture voice tasks."
+    NSSpeechRecognitionUsageDescription: "SayTodo uses speech recognition to convert voice to tasks."
+dmg:
+  title: SayTodo
+  artifactName: "SayTodo-${version}.dmg"
+files:
+  - "**/*"
+  - "!dist"
+  - "!generate-icon.js"
+  - "!speech-helper.swift"
+  - "!node_modules/uiohook-napi/prebuilds/!(darwin-*)"
+extraResources:
+  - from: assets/
+    to: assets/
+  - from: .env
+    to: ../
