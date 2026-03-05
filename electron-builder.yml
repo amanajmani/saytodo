@@ -28,4 +28,4 @@ extraResources:
   - from: assets/
     to: assets/
   - from: .env
-    to: ../
+    to: ./

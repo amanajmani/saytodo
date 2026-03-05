@@ -513,6 +513,45 @@
       text-transform: capitalize;
     }
 
+    /* Recurring badge */
+    .recurring-badge {
+      background: rgba(59,130,246,0.12);
+      color: #60a5fa;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    /* Notes badge */
+    .notes-badge {
+      background: rgba(245,158,11,0.1);
+      color: var(--amber);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+    }
+    .notes-badge:hover { background: rgba(245,158,11,0.2); }
+
+    /* Task notes */
+    .task-notes {
+      margin-top: 6px;
+      margin-left: 32px;
+      display: none;
+    }
+    .task-notes.expanded { display: block; }
+    .task-note {
+      font-size: 11px;
+      color: var(--text-dim);
+      line-height: 1.5;
+      padding: 4px 8px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 6px;
+      margin-bottom: 3px;
+      border-left: 2px solid rgba(245,158,11,0.3);
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
+    }
+
     /* AI Briefing banner */
     .briefing-banner {
       display: none;
@@ -528,17 +567,36 @@
       flex-shrink: 0;
       -webkit-app-region: no-drag;
     }
+    .briefing-banner .briefing-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
     .briefing-banner .briefing-label {
       font-size: 10px;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       color: #a78bfa;
-      margin-bottom: 4px;
+    }
+    .briefing-listen {
+      background: none; border: none;
+      color: #a78bfa;
+      cursor: pointer;
+      padding: 1px 4px;
+      font-size: 14px;
+      line-height: 1;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .briefing-listen:hover { background: rgba(139,92,246,0.15); }
+    .briefing-actions {
+      position: absolute;
+      top: 8px; right: 10px;
+      display: flex; gap: 4px;
     }
     .briefing-dismiss {
-      position: absolute;
-      top: 6px; right: 10px;
       background: none; border: none;
       color: var(--text-dim);
       font-size: 16px;
@@ -823,9 +881,16 @@
     </div>
 
     <div class="briefing-banner" id="briefing-banner">
-      <div class="briefing-label">Daily Briefing</div>
+      <div class="briefing-header">
+        <span class="briefing-label">Daily Briefing</span>
+        <button class="briefing-listen" id="listen-briefing" title="Read aloud">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+        </button>
+      </div>
       <span id="briefing-text"></span>
-      <button class="briefing-dismiss" id="dismiss-briefing">&times;</button>
+      <div class="briefing-actions">
+        <button class="briefing-dismiss" id="dismiss-briefing">&times;</button>
+      </div>
     </div>
 
     <div class="live-transcript" id="live-transcript"></div>

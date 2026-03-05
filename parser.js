@@ -177,6 +177,8 @@ function parseTask(rawText) {
     priority,
     dueDate: dueDate ? dueDate.toISOString().split('T')[0] : null,
     category: 'other',
+    recurrence: null,
+    notes: [],
     createdAt: new Date().toISOString(),
     done: false,
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7)

@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('saytodo', {
   onSpeechError: (callback) => ipcRenderer.on('speech-error', (_e, err) => callback(err)),
   onShortcutMode: (callback) => ipcRenderer.on('shortcut-mode', (_e, mode) => callback(mode)),
 
+  // Tasks updated from main process (recurring spawn, tray toggle)
+  onTasksUpdated: (callback) => ipcRenderer.on('tasks-updated', () => callback()),
+
   // Overlay control
   showOverlay: (text) => ipcRenderer.send('show-overlay', text),
   hideOverlay: () => ipcRenderer.send('hide-overlay'),
@@ -32,4 +35,8 @@ contextBridge.exposeInMainWorld('saytodo', {
   // AI features
   aiParse: (text, tasks) => ipcRenderer.invoke('ai-parse', text, tasks),
   aiBriefing: (tasks) => ipcRenderer.invoke('ai-briefing', tasks),
+
+  // Text-to-Speech
+  speak: (text) => ipcRenderer.invoke('speak', text),
+  stopSpeaking: () => ipcRenderer.invoke('stop-speaking'),
 });

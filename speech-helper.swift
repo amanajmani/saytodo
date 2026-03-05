@@ -9,7 +9,8 @@ class SpeechHelper: NSObject {
     var task: SFSpeechRecognitionTask?
 
     override init() {
-        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        // en-IN handles English + Hinglish well; pure Hindi gets picked up too
+        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-IN"))
         super.init()
     }
 

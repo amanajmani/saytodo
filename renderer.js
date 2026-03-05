@@ -123,7 +123,8 @@ async function processInput(rawText) {
         tasks.unshift(result.task);
         saveTasks();
         renderTasks();
-        showFeedback(`Added: "${result.task.text}"`, 'success');
+        const recLabel = result.task.recurrence ? ' (recurring)' : '';
+        showFeedback(`Added: "${result.task.text}"${recLabel}`, 'success');
         return;
       }
       if (result.type === 'command') {
@@ -172,6 +173,17 @@ function handleCommand(cmd) {
       saveTasks();
       renderTasks();
     }
+  } else if (action === 'add-note' && taskId && value) {
+    const task = tasks.find(t => t.id === taskId);
+    if (task) {
+      if (!task.notes) task.notes = [];
+      task.notes.push({
+        text: value,
+        createdAt: new Date().toISOString(),
+      });
+      saveTasks();
+      renderTasks();
+    }
   } else if (action === 'filter' && value) {
     const filterMap = {
       'all': 'all', 'pending': 'pending', 'done': 'done',
@@ -187,9 +199,42 @@ function handleCommand(cmd) {
       b.classList.toggle('active', b.dataset.filter === mapped);
     });
     renderTasks();
+  } else if (action === 'briefing') {
+    // Read the daily briefing out loud
+    speakBriefing();
   }
 
   if (message) showFeedback(message, 'success');
+}
+
+async function speakBriefing() {
+  showFeedback('Reading your briefing...', 'success');
+  try {
+    const result = await saytodo.aiBriefing(tasks);
+    if (result.ok && result.text) {
+      // Also build a spoken task list
+      const todayStr = new Date().toISOString().split('T')[0];
+      const pending = tasks.filter(t => !t.done);
+      const todayTasks = pending.filter(t => t.dueDate === todayStr);
+      const overdue = pending.filter(t => t.dueDate && t.dueDate < todayStr);
+
+      let speech = result.text;
+      if (todayTasks.length > 0) {
+        speech += '. Today you have: ' + todayTasks.map(t => t.text).join(', ') + '.';
+      }
+      if (overdue.length > 0) {
+        speech += ' Overdue: ' + overdue.map(t => t.text).join(', ') + '.';
+      }
+
+      await saytodo.speak(speech);
+      if (briefingBanner && briefingText) {
+        briefingText.textContent = result.text;
+        briefingBanner.style.display = 'block';
+      }
+    }
+  } catch (err) {
+    console.warn('Voice briefing failed:', err);
+  }
 }
 
 function showFeedback(msg, type) {
@@ -236,6 +281,12 @@ function setupListeners() {
       liveTranscript.textContent = '';
       liveTranscript.style.display = 'none';
     }, 600);
+  });
+
+  // Tasks updated from main process (recurring tasks spawned, tray toggle)
+  saytodo.onTasksUpdated(async () => {
+    tasks = await saytodo.getTasks();
+    renderTasks();
   });
 
   // Speech errors
@@ -297,6 +348,12 @@ function setupListeners() {
   dismissBriefing?.addEventListener('click', () => {
     if (briefingBanner) briefingBanner.style.display = 'none';
   });
+
+  // Listen briefing button
+  const listenBriefingBtn = document.getElementById('listen-briefing');
+  listenBriefingBtn?.addEventListener('click', () => {
+    speakBriefing();
+  });
 }
 
 function filterTasks(list) {
@@ -322,9 +379,11 @@ const CATEGORY_ICONS = {
 };
 
 function renderTasks() {
-  const filtered = filterTasks(tasks);
-  const pending = tasks.filter(t => !t.done).length;
-  const done = tasks.filter(t => t.done).length;
+  // Don't show recurring parent tasks (they're templates)
+  const visible = tasks.filter(t => !t.recurrence || t.recurringParentId);
+  const filtered = filterTasks(visible);
+  const pending = visible.filter(t => !t.done).length;
+  const done = visible.filter(t => t.done).length;
   pendingCount.textContent = `${pending} pending`;
   doneCount.textContent = `${done} done`;
 
@@ -342,8 +401,22 @@ function renderTasks() {
     const borderColor = priorityColors[task.priority] || priorityColors.low;
     const due = formatDueDate(task.dueDate);
     const catIcon = CATEGORY_ICONS[task.category] || CATEGORY_ICONS.other;
+    const isRecurring = task.recurringParentId;
+    const hasNotes = task.notes && task.notes.length > 0;
 
     const dateIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="opacity:0.7;margin-right:3px;vertical-align:-1px"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+
+    const repeatIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="opacity:0.7;margin-right:2px;vertical-align:-1px"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>';
+
+    const noteIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="opacity:0.7;margin-right:2px;vertical-align:-1px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+
+    // Build notes HTML
+    let notesHtml = '';
+    if (hasNotes) {
+      notesHtml = `<div class="task-notes">
+        ${task.notes.map(n => `<div class="task-note">${noteIcon} ${escapeHtml(n.text)}</div>`).join('')}
+      </div>`;
+    }
 
     return `
       <div class="task-card ${task.done ? 'done' : ''}" data-id="${task.id}">
@@ -360,7 +433,10 @@ function renderTasks() {
             <span class="badge priority-${task.priority}">${priorityLabels[task.priority]}</span>
             ${task.category && task.category !== 'other' ? `<span class="badge category-badge">${catIcon} ${task.category}</span>` : ''}
             ${due ? `<span class="badge date-badge date-${due.color}">${dateIcon}${due.label}</span>` : ''}
+            ${isRecurring ? `<span class="badge recurring-badge">${repeatIcon}Recurring</span>` : ''}
+            ${hasNotes ? `<span class="badge notes-badge" data-action="toggle-notes" data-id="${task.id}">${noteIcon}${task.notes.length} note${task.notes.length > 1 ? 's' : ''}</span>` : ''}
           </div>
+          ${notesHtml}
         </div>
       </div>
     `;
@@ -375,9 +451,15 @@ function renderTasks() {
       const task = tasks.find(t => t.id === id);
       if (task) { task.done = !task.done; saveTasks(); renderTasks(); }
     } else if (action === 'delete') {
+      // Also delete recurring parent if this is a recurring instance
+      const task = tasks.find(t => t.id === id);
       tasks = tasks.filter(t => t.id !== id);
       saveTasks();
       renderTasks();
+    } else if (action === 'toggle-notes') {
+      const card = btn.closest('.task-card');
+      const notes = card?.querySelector('.task-notes');
+      if (notes) notes.classList.toggle('expanded');
     }
   };
 }

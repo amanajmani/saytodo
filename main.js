@@ -4,15 +4,25 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const Store = require('electron-store');
 
-// Load .env file
-try {
-  const envPath = app.isPackaged ? path.join(process.resourcesPath, '.env') : path.join(__dirname, '.env');
-  const envContent = fs.readFileSync(envPath, 'utf8');
-  for (const line of envContent.split('\n')) {
-    const match = line.match(/^\s*([\w]+)\s*=\s*(.+)\s*$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+// Load .env file — try multiple paths for dev vs packaged
+function loadEnv() {
+  const candidates = [
+    path.join(__dirname, '.env'),
+    app.isPackaged ? path.join(process.resourcesPath, '.env') : null,
+    app.isPackaged ? path.join(process.resourcesPath, '..', '.env') : null,
+  ].filter(Boolean);
+  for (const envPath of candidates) {
+    try {
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      for (const line of envContent.split('\n')) {
+        const match = line.match(/^\s*([\w]+)\s*=\s*(.+)\s*$/);
+        if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+      }
+      return; // Found and loaded
+    } catch {}
   }
-} catch {}
+}
+loadEnv();
 
 const logFile = '/tmp/saytodo-debug.log';
 function log(...args) {
@@ -33,6 +43,7 @@ let isListening = false;
 let speechProcess = null;
 let lastTranscript = '';
 let uIOhook = null;
+let ttsProcess = null;
 
 function getAssetPath(filename) {
   if (app.isPackaged) return path.join(process.resourcesPath, 'assets', filename);
@@ -101,6 +112,18 @@ function toggleMainWindow() {
   mainWindow.show(); mainWindow.focus();
 }
 
+// --- Text-to-Speech using macOS `say` ---
+function speak(text) {
+  if (ttsProcess) { try { ttsProcess.kill(); } catch {} ttsProcess = null; }
+  if (!text) return;
+  ttsProcess = spawn('say', ['-r', '180', text]);
+  ttsProcess.on('close', () => { ttsProcess = null; });
+  ttsProcess.on('error', () => { ttsProcess = null; });
+}
+function stopSpeaking() {
+  if (ttsProcess) { try { ttsProcess.kill(); } catch {} ttsProcess = null; }
+}
+
 // --- Speech Recognition ---
 function startSpeechRecognition() {
   if (speechProcess) return;
@@ -125,6 +148,7 @@ function stopSpeechRecognition() {
 
 function startListeningMode() {
   if (isListening) return; isListening = true;
+  stopSpeaking(); // Stop any TTS if user starts talking
   showOverlay('Listening...'); startSpeechRecognition();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('listening-state', 'start');
 }
@@ -164,12 +188,129 @@ function setupFallbackShortcut() {
 }
 
 // ============================================================
+// MENUBAR QUICK GLANCE — dynamic tray menu with top tasks
+// ============================================================
+
+function updateTrayMenu() {
+  if (!tray) return;
+  const tasks = store.get('tasks', []);
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // Get today's tasks first, then overdue, then upcoming — max 5
+  const pending = tasks.filter(t => !t.done);
+  const todayTasks = pending.filter(t => t.dueDate === todayStr);
+  const overdue = pending.filter(t => t.dueDate && t.dueDate < todayStr);
+  const upcoming = pending.filter(t => !t.dueDate || t.dueDate > todayStr);
+  const glanceTasks = [...overdue, ...todayTasks, ...upcoming].slice(0, 5);
+
+  const priorityDots = { high: '🔴', med: '🟡', low: '🟢' };
+  const taskItems = glanceTasks.map(t => {
+    const dot = priorityDots[t.priority] || '🟢';
+    const dueLabel = t.dueDate === todayStr ? ' (today)' : t.dueDate && t.dueDate < todayStr ? ' (overdue!)' : '';
+    return {
+      label: `${dot} ${t.text}${dueLabel}`,
+      enabled: true,
+      click: () => {
+        // Toggle done
+        t.done = !t.done;
+        store.set('tasks', tasks);
+        updateTrayMenu();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('tasks-updated');
+        }
+      }
+    };
+  });
+
+  const menuTemplate = [];
+
+  if (taskItems.length > 0) {
+    menuTemplate.push({ label: 'Today\'s Tasks', enabled: false });
+    menuTemplate.push(...taskItems);
+    menuTemplate.push({ type: 'separator' });
+  }
+
+  const pendingCount = pending.length;
+  if (pendingCount > 0) {
+    menuTemplate.push({ label: `${pendingCount} task${pendingCount === 1 ? '' : 's'} pending`, enabled: false });
+  }
+
+  menuTemplate.push({ label: 'Show SayTodo', click: () => toggleMainWindow() });
+  menuTemplate.push({ type: 'separator' });
+  menuTemplate.push({ label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } });
+
+  const menu = Menu.buildFromTemplate(menuTemplate);
+  tray.on('right-click', () => tray.popUpContextMenu(menu));
+  // Update tooltip with count
+  tray.setToolTip(pendingCount > 0 ? `SayTodo — ${pendingCount} pending` : 'SayTodo');
+}
+
+// ============================================================
+// RECURRING TASKS — spawn due instances on app boot
+// ============================================================
+
+const WEEKDAY_MAP = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+
+function spawnRecurringTasks() {
+  const tasks = store.get('tasks', []);
+  const todayStr = new Date().toISOString().split('T')[0];
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayDay = today.getDay();
+  let changed = false;
+
+  // Track which recurring parents already have a pending instance for today
+  const recurringParents = tasks.filter(t => t.recurrence);
+
+  for (const parent of recurringParents) {
+    const rec = parent.recurrence; // e.g. { type: 'weekly', days: [1, 3, 5] } or { type: 'daily' }
+
+    let shouldSpawnToday = false;
+    if (rec.type === 'daily') {
+      shouldSpawnToday = true;
+    } else if (rec.type === 'weekly' && Array.isArray(rec.days)) {
+      shouldSpawnToday = rec.days.includes(todayDay);
+    } else if (rec.type === 'monthly' && rec.dayOfMonth) {
+      shouldSpawnToday = today.getDate() === rec.dayOfMonth;
+    }
+
+    if (!shouldSpawnToday) continue;
+
+    // Check if we already spawned one for today
+    const alreadySpawned = tasks.some(t =>
+      t.recurringParentId === parent.id && t.dueDate === todayStr
+    );
+    if (alreadySpawned) continue;
+
+    // Spawn a new instance
+    tasks.unshift({
+      text: parent.text,
+      priority: parent.priority,
+      dueDate: todayStr,
+      category: parent.category || 'other',
+      createdAt: new Date().toISOString(),
+      done: false,
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      recurringParentId: parent.id,
+    });
+    changed = true;
+  }
+
+  if (changed) {
+    store.set('tasks', tasks);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('tasks-updated');
+    }
+  }
+}
+
+// ============================================================
 // GROQ AI ENGINE — one call does everything
 // ============================================================
 
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
+log('[main] Groq key loaded:', GROQ_KEY ? 'yes (' + GROQ_KEY.slice(0, 8) + '...)' : 'NO — AI features disabled');
 
-function groqRequest(messages, maxTokens = 250) {
+function groqRequest(messages, maxTokens = 300) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       model: 'llama-3.3-70b-versatile',
@@ -195,21 +336,26 @@ function groqRequest(messages, maxTokens = 250) {
       });
     });
     request.on('error', reject);
-    const timer = setTimeout(() => { request.abort(); reject(new Error('timeout')); }, 6000);
+    const timer = setTimeout(() => { request.abort(); reject(new Error('timeout')); }, 8000);
     request.on('response', () => clearTimeout(timer));
     request.write(body);
     request.end();
   });
 }
 
-// --- Smart Parse: new task OR voice command, all in one call ---
+// --- Smart Parse: new task, voice command, recurring, notes, briefing — all in one call ---
 ipcMain.handle('ai-parse', async (_e, rawText, existingTasks) => {
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   // Build a slim task summary for command context (max 20 tasks to save tokens)
-  const taskSummary = (existingTasks || []).slice(0, 20).map(t =>
-    `[${t.id}] "${t.text}" priority:${t.priority} done:${t.done}${t.dueDate ? ' due:' + t.dueDate : ''}${t.category ? ' cat:' + t.category : ''}`
-  ).join('\n');
+  const taskSummary = (existingTasks || []).slice(0, 20).map(t => {
+    let s = `[${t.id}] "${t.text}" priority:${t.priority} done:${t.done}`;
+    if (t.dueDate) s += ` due:${t.dueDate}`;
+    if (t.category) s += ` cat:${t.category}`;
+    if (t.notes && t.notes.length) s += ` notes:${t.notes.length}`;
+    if (t.recurrence) s += ` recurring:${t.recurrence.type}`;
+    return s;
+  }).join('\n');
 
   try {
     const result = await groqRequest([
@@ -217,29 +363,42 @@ ipcMain.handle('ai-parse', async (_e, rawText, existingTasks) => {
         role: 'system',
         content: `You are SayTodo's AI brain. Today is ${todayStr}.
 
-You receive raw voice/text input. Determine if it's a NEW TASK or a COMMAND on existing tasks.
+You receive raw voice/text input. The user may speak in English, Hindi, or Hinglish (mix of Hindi+English).
+ALWAYS output the task text in clean English regardless of input language.
+Examples:
+- "mujhe khaana banake rakhna hai" → "Cook and store food"
+- "kal grocery leni hai" → "Buy groceries"
+- "dentist ka appointment book karna hai next week" → "Book dentist appointment"
+- "umm i think i need to like buy some diet coke tomorrow" → "Buy diet coke"
 
-Return ONLY valid JSON in one of these formats:
+Determine which type the input is and return ONLY valid JSON.
 
-== NEW TASK ==
-{"type":"task","text":"Clean task description","priority":"high|med|low","dueDate":"YYYY-MM-DD or null","category":"work|personal|health|errands|finance|learning|social|other"}
+== TYPE 1: NEW TASK ==
+{"type":"task","text":"Clean task description in English","priority":"high|med|low","dueDate":"YYYY-MM-DD or null","category":"work|personal|health|errands|finance|learning|social|other","recurrence":null}
 
-Rules for tasks:
-- "text": Clean description. Remove filler words (um, uh, like, you know, basically, actually, so, well, kind of, sort of). Remove priority/date keywords. Capitalize first letter.
-- "priority": "high" only if user says high/high priority. "med" only if user says medium/med. Otherwise always "low".
-- "dueDate": Resolve relative dates (tomorrow, next friday, march 15, in 3 days, end of week, etc.) to YYYY-MM-DD. null if none mentioned.
-- "category": Best-fit category from the list. Infer from context (e.g. "call dentist" = health, "submit report" = work, "buy milk" = errands).
+Rules:
+- "text": Clean, concise English description. Translate Hindi/Hinglish to English. Remove ALL filler words (um, uh, like, you know, basically, actually, I think, I need to, I don't know, I guess, maybe). Extract only the core action. Capitalize first letter.
+- "priority": "high" only if user says high/urgent. "med" if medium/med. Otherwise "low".
+- "dueDate": Resolve relative dates to YYYY-MM-DD. null if none.
+- "category": Best-fit from list. Infer from context.
+- "recurrence": null unless user says "every day/daily", "every monday", "every week", "every month", etc.
+  - Daily: {"type":"daily"}
+  - Weekly with days: {"type":"weekly","days":[1,3,5]} (0=Sun,1=Mon...6=Sat)
+  - Monthly: {"type":"monthly","dayOfMonth":15}
+  Examples: "gym every monday wednesday friday" → recurrence:{"type":"weekly","days":[1,3,5]}, dueDate=next occurrence
+  "take vitamins every day" → recurrence:{"type":"daily"}, dueDate=today
 
-== COMMAND (action on existing tasks) ==
-{"type":"command","action":"complete|delete|priority|reschedule|filter","taskId":"id or null","value":"new value if needed","message":"Confirmation message to show user"}
+== TYPE 2: COMMAND (action on existing tasks) ==
+{"type":"command","action":"complete|delete|priority|reschedule|add-note|filter|briefing","taskId":"id or null","value":"depends on action","message":"Confirmation to show user"}
 
-Commands the user might say:
-- "mark groceries done" / "complete the report task" / "finish buying milk" → complete
-- "delete the dentist task" / "remove call mom" → delete
-- "change report to high priority" / "make groceries high" → priority (value: "high"|"med"|"low")
-- "move dentist to friday" / "reschedule report to next week" → reschedule (value: "YYYY-MM-DD")
-- "show high priority" / "show what's due today" / "show done tasks" → filter (value: filter name)
-- "what's due today" / "what do I have tomorrow" → filter
+Commands:
+- "mark X done"/"complete X" → action:"complete"
+- "delete X"/"remove X" → action:"delete"
+- "change X to high priority" → action:"priority", value:"high|med|low"
+- "move X to friday" → action:"reschedule", value:"YYYY-MM-DD"
+- "add note to X — bring insurance card" → action:"add-note", value:"the note text"
+- "show high priority"/"what's due today" → action:"filter", value:"high|med|low|today|overdue|pending|done|all"
+- "what's my day look like"/"briefing"/"daily summary"/"read my tasks" → action:"briefing" (user wants to hear their tasks read aloud)
 
 Match commands to existing tasks by fuzzy-matching the task text. Use the task ID from the list.
 
@@ -262,6 +421,8 @@ IMPORTANT: Return ONLY the JSON object, nothing else.`
           priority: ['high', 'med', 'low'].includes(result.priority) ? result.priority : 'low',
           dueDate: result.dueDate || null,
           category: result.category || 'other',
+          recurrence: result.recurrence || null,
+          notes: [],
           createdAt: new Date().toISOString(),
           done: false,
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
@@ -312,7 +473,6 @@ ipcMain.handle('ai-briefing', async (_e, taskList) => {
     return { ok: true, text };
   } catch (err) {
     log('[groq] Briefing failed:', err.message);
-    // Generate a basic offline briefing
     const overdue = pending.filter(t => t.dueDate && t.dueDate < todayKey).length;
     const dueToday = pending.filter(t => t.dueDate === todayKey).length;
     let text = `You have ${pending.length} pending task${pending.length === 1 ? '' : 's'}.`;
@@ -322,9 +482,17 @@ ipcMain.handle('ai-briefing', async (_e, taskList) => {
   }
 });
 
+// --- TTS IPC ---
+ipcMain.handle('speak', (_e, text) => { speak(text); return true; });
+ipcMain.handle('stop-speaking', () => { stopSpeaking(); return true; });
+
 // --- Standard IPC ---
 ipcMain.handle('get-tasks', () => store.get('tasks', []));
-ipcMain.handle('save-tasks', (_e, tasks) => { store.set('tasks', tasks); return true; });
+ipcMain.handle('save-tasks', (_e, tasks) => {
+  store.set('tasks', tasks);
+  updateTrayMenu();
+  return true;
+});
 ipcMain.handle('get-mic-permission', async () => {
   const s = systemPreferences.getMediaAccessStatus('microphone');
   if (s === 'not-determined') { const g = await systemPreferences.askForMediaAccess('microphone'); return g ? 'granted' : 'denied'; }
@@ -352,20 +520,20 @@ app.on('ready', () => {
   try {
     tray = new Tray(createTrayIcon());
     tray.setToolTip('SayTodo');
-    const menu = Menu.buildFromTemplate([
-      { label: 'Show SayTodo', click: () => toggleMainWindow() },
-      { type: 'separator' },
-      { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
-    ]);
     tray.on('click', () => toggleMainWindow());
-    tray.on('right-click', () => tray.popUpContextMenu(menu));
+
     createMainWindow(); createOverlayWindow(); setupGlobalKeyListener();
+    updateTrayMenu();
+
+    // Spawn recurring tasks on boot
+    spawnRecurringTasks();
+
     setTimeout(() => toggleMainWindow(), 500);
   } catch (err) { log('[main] FATAL:', err.message, err.stack); }
 });
 app.on('window-all-closed', (e) => { e?.preventDefault?.(); });
 app.on('before-quit', () => {
-  app.isQuitting = true; stopSpeechRecognition();
+  app.isQuitting = true; stopSpeechRecognition(); stopSpeaking();
   if (uIOhook) { try { uIOhook.stop(); } catch {} }
   globalShortcut.unregisterAll();
 });
